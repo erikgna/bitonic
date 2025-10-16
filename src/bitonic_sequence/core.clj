@@ -1,117 +1,121 @@
-(ns bitonic-sequence.core
-  "Core implementation of Bitonic Sequence generation.
-  
-  A bitonic sequence is a sequence that first increases and then decreases,
-  or can be circularly shifted to become so."
-  (:require [clojure.tools.logging :as log]))
+(ns bitonic_sequence.core
+  (:require [org.httpkit.server :as http-kit]
+            [compojure.core :refer [defroutes GET]]
+            [compojure.route :as route]
+            [taoensso.carmine :as car]
+            [ring.middleware.params :refer [wrap-params]]
+            [cheshire.core :as json])
+  (:gen-class))
 
-(defn generate-bitonic-sequence
-  "Generates a bitonic sequence of length n from range [low, high].
-  
-  A bitonic sequence first strictly increases, then strictly decreases.
-  
-  Parameters:
-  - n: Total length of sequence (must be >= 2)
-  - low: Minimum value (inclusive)
-  - high: Maximum value (inclusive)
-  
-  Returns:
-  - Vector containing the bitonic sequence
-  
-  Algorithm:
-  1. Split n into two parts: increasing (k) and decreasing (n-k)
-  2. Generate k increasing values
-  3. Generate n-k decreasing values
-  4. Ensure strict monotonicity by adjusting values
-  
-  Example:
-  (generate-bitonic-sequence 5 1 10)
-  => [2 5 9 7 3]"
-  [n low high]
-  {:pre [(>= n 2)
-         (<= low high)
-         (>= (- high low) (- n 1))]}
-  
-  (log/debug (format "Generating bitonic sequence: n=%d, range=[%d,%d]" n low high))
-  
-  (let [;; Split point for increasing/decreasing parts
-        k (inc (rand-int (dec n)))  ; k is between 1 and n-1
-        
-        ;; Calculate step sizes for each part
-        range-size (- high low)
-        total-steps (dec n)
-        
-        ;; Generate increasing part (k elements)
-        increasing-part (vec (take k (iterate 
-                                       #(+ % (inc (rand-int (quot range-size total-steps))))
-                                       (+ low (rand-int (quot range-size 2))))))
-        
-        ;; Find peak value (last of increasing part)
-        peak (last increasing-part)
-        
-        ;; Generate decreasing part (n-k elements)
-        decreasing-part (vec (take (- n k)
-                                   (iterate 
-                                     #(max low (- % (inc (rand-int (quot range-size total-steps)))))
-                                     (- peak (inc (rand-int (quot range-size total-steps)))))))]
+; Redis connection configuration
+(def redis-conn {:pool {} :spec {:uri "redis://redis:6379"}})
+
+(defmacro wcar* [& body] `(car/wcar redis-conn ~@body))
+
+(defn max-bitonic-length
+  "Calculate maximum possible bitonic sequence length for range [l, r]"
+  [l r]
+  (inc (* 2 (- r l))))
+
+(defn generate-bitonic
+  "Generate bitonic sequence of length n using range [l, r].
+   Returns [-1] if impossible."
+  [n l r]
+  (if (> n (max-bitonic-length l r))
+    [-1]
+    (loop [result [(dec r)]
+           current r
+           phase :decreasing]
+      (if (= (count result) n)
+        result
+        (case phase
+          :decreasing
+          (if (> current l)
+            (recur (conj result current) (inc current) :decreasing)
+            (recur result (- r 2) :increasing))
+          
+          :increasing
+          (if (and (>= current l) (< (count result) n))
+            (recur (into [current] result) (dec current) :increasing)
+            result))))))
+
+(defn- respond
+  "Create HTTP response with JSON body"
+  [status body]
+  {:status status
+   :headers {"Content-Type" "application/json; charset=utf-8"
+             "Cache-Control" "public, max-age=3600"}
+   :body (json/generate-string body)})
+
+(defn- parse-long-safe
+  "Safely parse string to Long, returns nil on error"
+  [s]
+  (try
+    (Long/parseLong s)
+    (catch NumberFormatException _ nil)))
+
+(defn- validate-params
+  "Validate bitonic parameters. Returns [valid? error-msg]"
+  [n l r]
+  (cond
+    (not (and n l r))
+    [false "Missing required parameters: n, l, r"]
     
-    ;; Combine both parts
-    (vec (concat increasing-part decreasing-part))))
+    (<= n 2)
+    [false "Parameter n must be greater than 2"]
+    
+    (>= l r)
+    [false "Parameter l must be less than r"]
+    
+    :else
+    [true nil]))
 
-(defn validate-bitonic
-  "Validates if a sequence is bitonic.
-  
-  Returns a map with:
-  - :valid? - boolean indicating if sequence is valid
-  - :peak-index - index of the peak element
-  - :reason - explanation if invalid"
-  [sequence]
-  (let [n (count sequence)]
-    (cond
-      (< n 2)
-      {:valid? false :reason "Sequence too short (minimum 2 elements)"}
+(defn- get-cached-result
+  "Attempt to fetch result from Redis cache"
+  [redis-key]
+  (try
+    (when-let [cached (wcar* (car/get redis-key))]
+      (json/parse-string cached))
+    (catch Exception e
+      (println "Redis fetch error:" (.getMessage e))
+      nil)))
+
+(defn- cache-result
+  "Store result in Redis with 1-hour TTL"
+  [redis-key result]
+  (try
+    (wcar* (car/setex redis-key 3600 (json/generate-string result)))
+    (catch Exception e
+      (println "Redis cache error:" (.getMessage e)))))
+
+(defn bitonic-handler
+  "Handle /bitonic endpoint with caching"
+  [req]
+  (let [params (:query-params req)
+        n (some-> (get params "n") parse-long-safe)
+        l (some-> (get params "l") parse-long-safe)
+        r (some-> (get params "r") parse-long-safe)
+        [valid? error-msg] (validate-params n l r)]
+    
+    (if-not valid?
+      (respond 400 {:error error-msg})
       
-      :else
-      (let [;; Find the peak (where increase stops)
-            increasing-part (take-while #(< (first %) (second %)) 
-                                       (partition 2 1 sequence))
-            peak-idx (count increasing-part)
-            
-            ;; Check decreasing part
-            decreasing-part (drop peak-idx (partition 2 1 sequence))
-            is-decreasing? (every? #(> (first %) (second %)) decreasing-part)]
-        
-        (if (and (pos? peak-idx)
-                 (< peak-idx (dec n))
-                 is-decreasing?)
-          {:valid? true :peak-index peak-idx}
-          {:valid? false 
-           :reason "Sequence is not strictly increasing then strictly decreasing"
-           :peak-index peak-idx})))))
+      (let [redis-key (str "bitonic:" n ":" l ":" r)]
+        (if-let [cached (get-cached-result redis-key)]
+          (respond 200 {:n n :l l :r r :result cached :cached true})
+          
+          (let [result (generate-bitonic n l r)]
+            (cache-result redis-key result)
+            (respond 200 {:n n :l l :r r :result result :cached false})))))))
 
-(defn generate-multiple
-  "Generate multiple bitonic sequences.
-  
-  Parameters:
-  - count: Number of sequences to generate
-  - n: Length of each sequence
-  - low: Minimum value
-  - high: Maximum value
-  
-  Returns:
-  - Vector of bitonic sequences"
-  [count n low high]
-  (vec (repeatedly count #(generate-bitonic-sequence n low high))))
+(defroutes app-routes
+  (GET "/bitonic" [] bitonic-handler)
+  (GET "/health" [] (respond 200 {:status "healthy"}))
+  (route/not-found (respond 404 {:error "Not Found"})))
 
-(defn -main
-  "Main entry point for command-line usage."
-  [& args]
-  (let [n (if (first args) (Integer/parseInt (first args)) 10)
-        low (if (second args) (Integer/parseInt (second args)) 1)
-        high (if (nth args 2 nil) (Integer/parseInt (nth args 2)) 100)]
-    (println "Generating bitonic sequence...")
-    (println "Parameters:" {:n n :low low :high high})
-    (let [sequence (generate-bitonic-sequence n low high)
-          validation (validate-bitonic sequence)]
-      (println "Generated sequence:" sequence)
-      (println "Validation:" validation))))
+(def app (wrap-params app-routes))
+
+(defn -main [& args]
+  (let [port 3000]
+    (println (str "🚀 Server starting on http://localhost:" port))
+    (http-kit/run-server app {:port port})))

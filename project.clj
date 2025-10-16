@@ -23,3 +23,6 @@
   :profiles {:uberjar {:aot :all
                        :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}
              :dev {:dependencies [[ring/ring-mock "0.4.0"]]}})
+
+:test-paths ["test"]
+:source-paths ["src"]

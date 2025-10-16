@@ -1,0 +1,30 @@
+ns - Define namespace
+:require - Import
+(:gen-class) - Generate a Java class
+def - Global var
+defmacro - Macros in Clojure are like functions that manipulate code itself before it runs
+& body - “accept any number of expressions as arguments”.
+defn - Defines functions
+defn- - Private function
+[n l r] - Parameters of function
+
+How mapping works:
+{:status status
+    :headers {"Content-Type" "application/json; charset=utf-8"}
+    :body (json/generate-string body)
+} 
+
+(if (> n (+ (* (- r l) 2) 1)) - Equivalent to: if n > (r - l) * 2 + 1:
+
+let - Local variables
+[initial-dq [(dec r)] - Start a vector
+
+reduce - Loops through values from r down to l:
+(range r (dec l) -1) - Generates numbers: r, r-1, ..., l.
+(fn [dq i] ...) - Is an anonymous function with accumulator dq (the sequence so far) and i (the current number).
+(conj dq i) - Appends i to the end of the vector.
+(reduced dq) - Stops the reduce early once the sequence reaches length n.
+
+(deftest generate-bitonic-test - Create test function
+  (testing "Example 1 from prompt" - Description
+    (is (= [9 10 9 8 7] (generate-bitonic 5 3 10))))) - expected [9 10 9 8 7] = function result for 5 3 10
